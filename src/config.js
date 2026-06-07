@@ -5,6 +5,12 @@ const REQUIRED = [
   'X_DM_CONVERSATION_ID'
 ];
 
+function boolFromEnv(env, name, fallback = false) {
+  const raw = env[name];
+  if (raw === undefined || raw === '') return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(raw.toLowerCase());
+}
+
 function intFromEnv(env, name, fallback) {
   const raw = env[name];
   if (raw === undefined || raw === '') return fallback;
@@ -37,7 +43,16 @@ export function loadConfig(env = process.env) {
       apiBaseUrl: env.X_API_BASE_URL ?? 'https://api.x.com/2',
       pollIntervalMs: intFromEnv(env, 'X_POLL_INTERVAL_MS', 15000),
       pollLimit: intFromEnv(env, 'X_POLL_LIMIT', 50),
-      maxAttachmentLinks: intFromEnv(env, 'X_MAX_ATTACHMENT_LINKS', 4)
+      maxAttachmentLinks: intFromEnv(env, 'X_MAX_ATTACHMENT_LINKS', 4),
+      selenium: {
+        enabled: boolFromEnv(env, 'X_SELENIUM_ENABLED'),
+        remoteUrl: env.X_SELENIUM_REMOTE_URL ?? 'http://localhost:4444',
+        browserName: env.X_SELENIUM_BROWSER ?? 'chrome',
+        headless: boolFromEnv(env, 'X_SELENIUM_HEADLESS', true),
+        timeoutMs: intFromEnv(env, 'X_SELENIUM_TIMEOUT_MS', 10000),
+        dmUrl: env.X_SELENIUM_DM_URL ?? '',
+        sendFallback: boolFromEnv(env, 'X_SELENIUM_SEND_FALLBACK')
+      }
     }
   };
 }

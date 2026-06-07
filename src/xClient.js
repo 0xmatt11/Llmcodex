@@ -1,10 +1,13 @@
 import { RetryableHttpError, retryAfterMs, withRetry } from './retry.js';
 
 export class XClient {
-  constructor({ accessToken, apiBaseUrl, logger }) {
+  constructor({ accessToken, apiBaseUrl, logger, seleniumClient, seleniumSendFallback = false, seleniumDmUrl }) {
     this.accessToken = accessToken;
     this.apiBaseUrl = apiBaseUrl.replace(/\/$/, '');
     this.logger = logger;
+    this.seleniumClient = seleniumClient;
+    this.seleniumSendFallback = seleniumSendFallback;
+    this.seleniumDmUrl = seleniumDmUrl;
     this.authenticatedUserId = null;
   }
 
@@ -59,15 +62,21 @@ export class XClient {
   }
 
   async sendDm(conversationId, text) {
-    const payload = await this.request(`/dm_conversations/${encodeURIComponent(conversationId)}/messages`, {
-      method: 'POST',
-      body: { text }
-    });
-    return { id: payload.data?.dm_event_id ?? payload.data?.id ?? payload.id, raw: payload };
+    try {
+      const payload = await this.request(`/dm_conversations/${encodeURIComponent(conversationId)}/messages`, {
+        method: 'POST',
+        body: { text }
+      });
+      return { id: payload.data?.dm_event_id ?? payload.data?.id ?? payload.id, raw: payload };
+    } catch (error) {
+      if (!this.seleniumClient || !this.seleniumSendFallback) throw error;
+      this.logger?.warn({ err: error }, 'X API send failed; falling back to Selenium web send');
+      return this.seleniumClient.sendDm(conversationId, text, { dmUrl: this.seleniumDmUrl });
+    }
   }
 
   async close() {
-    // API client currently owns no persistent resources.
+    await this.seleniumClient?.close?.();
   }
 
   async listDmEvents(conversationId, { sinceId, maxResults = 50 } = {}) {
@@ -78,6 +87,30 @@ export class XClient {
         'dm_event.fields': 'id,text,created_at,sender_id,attachments'
       }
     });
-    return payload.data ?? [];
+    const apiEvents = payload.data ?? [];
+    if (!this.seleniumClient) return apiEvents;
+
+    try {
+      const seleniumEvents = await this.seleniumClient.listDmEvents(conversationId, {
+        maxResults,
+        dmUrl: this.seleniumDmUrl
+      });
+      return mergeDmEvents(apiEvents, seleniumEvents);
+    } catch (error) {
+      this.logger?.warn({ err: error }, 'failed to supplement X API DM events with Selenium');
+      return apiEvents;
+    }
   }
+}
+
+function mergeDmEvents(apiEvents, seleniumEvents) {
+  const seen = new Set();
+  const merged = [];
+  for (const event of [...apiEvents, ...seleniumEvents]) {
+    const key = event.id ?? event.dm_event_id ?? `${event.sender_id ?? ''}:${event.text ?? ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(event);
+  }
+  return merged;
 }

@@ -1,6 +1,31 @@
+import { createHash } from 'node:crypto';
 import { RetryableHttpError, retryAfterMs, withRetry } from './retry.js';
 
-export class XClient {
+const WEBDRIVER_ELEMENT_KEY = 'element-6066-11e4-a52e-4f735466cecf';
+const ENTER_KEY = '\uE007';
+
+function syntheticId(prefix, parts) {
+  return `${prefix}:${createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 24)}`;
+}
+
+function joinWebDriverPath(baseUrl, path) {
+  const normalizedBase = baseUrl.replace(/\/$/, '');
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return `${normalizedBase}${normalizedPath}`;
+}
+
+function parseJsonObject(value, name) {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
+    return parsed;
+  } catch (error) {
+    throw new Error(`${name} must be a JSON object`);
+  }
+}
+
+export class XApiClient {
   constructor({ accessToken, apiBaseUrl, logger }) {
     this.accessToken = accessToken;
     this.apiBaseUrl = apiBaseUrl.replace(/\/$/, '');
@@ -66,6 +91,10 @@ export class XClient {
     return { id: payload.data?.dm_event_id ?? payload.data?.id ?? payload.id, raw: payload };
   }
 
+  isValidEventId(value) {
+    return typeof value === 'string' && /^\d+$/.test(value);
+  }
+
   async close() {
     // API client currently owns no persistent resources.
   }
@@ -81,3 +110,215 @@ export class XClient {
     return payload.data ?? [];
   }
 }
+
+export class SeleniumXClient {
+  constructor({ selenium, logger }) {
+    this.config = selenium;
+    this.logger = logger;
+    this.sessionId = null;
+    this.recentSentTextHashes = new Set();
+  }
+
+  capabilities() {
+    const capabilities = {
+      browserName: this.config.browserName,
+      ...parseJsonObject(this.config.capabilitiesJson, 'X_SELENIUM_CAPABILITIES_JSON')
+    };
+    const args = [];
+    if (this.config.headless) args.push('--headless=new');
+    if (this.config.browserName === 'chrome') {
+      args.push('--no-sandbox', '--disable-dev-shm-usage');
+      if (this.config.profileDir) args.push(`--user-data-dir=${this.config.profileDir}`);
+      capabilities['goog:chromeOptions'] = {
+        args,
+        ...(capabilities['goog:chromeOptions'] ?? {})
+      };
+    }
+    if (this.config.browserName === 'firefox') {
+      if (this.config.headless) args.splice(0, args.length, '-headless');
+      if (this.config.profileDir) args.push('-profile', this.config.profileDir);
+      capabilities['moz:firefoxOptions'] = {
+        args,
+        ...(capabilities['moz:firefoxOptions'] ?? {})
+      };
+    }
+    return capabilities;
+  }
+
+  async webdriver(method, path, body) {
+    const response = await fetch(joinWebDriverPath(this.config.remoteUrl, path), {
+      method,
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body)
+    });
+    const text = await response.text();
+    const payload = text ? JSON.parse(text) : {};
+    if (!response.ok || payload.value?.error) {
+      const error = new Error(payload.value?.message ?? `WebDriver status ${response.status}`);
+      error.status = response.status;
+      error.payload = payload;
+      throw error;
+    }
+    return payload.value;
+  }
+
+  async ensureSession() {
+    if (this.sessionId) return;
+    const value = await this.webdriver('POST', '/session', {
+      capabilities: { alwaysMatch: this.capabilities() }
+    });
+    this.sessionId = value.sessionId;
+    this.logger?.info({ browserName: this.config.browserName }, 'started Selenium WebDriver session for X DMs');
+  }
+
+  async session(method, path, body) {
+    await this.ensureSession();
+    return this.webdriver(method, `/session/${this.sessionId}${path}`, body);
+  }
+
+  async navigateToConversation(conversationId) {
+    const url = this.config.dmUrl || `${this.config.baseUrl.replace(/\/$/, '')}/messages/${encodeURIComponent(conversationId)}`;
+    await this.session('POST', '/url', { url });
+  }
+
+  async findElement(selector) {
+    return this.session('POST', '/element', { using: 'css selector', value: selector });
+  }
+
+  async findElements(selector, rootElementId) {
+    const path = rootElementId ? `/element/${rootElementId}/elements` : '/elements';
+    return this.session('POST', path, { using: 'css selector', value: selector });
+  }
+
+  elementId(element) {
+    return element?.[WEBDRIVER_ELEMENT_KEY] ?? element?.ELEMENT;
+  }
+
+  async waitForElement(selector) {
+    const startedAt = Date.now();
+    let lastError;
+    while (Date.now() - startedAt <= this.config.waitTimeoutMs) {
+      try {
+        return await this.findElement(selector);
+      } catch (error) {
+        lastError = error;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+    }
+    throw lastError ?? new Error(`Timed out waiting for selector ${selector}`);
+  }
+
+  async elementText(elementId) {
+    return this.session('GET', `/element/${elementId}/text`);
+  }
+
+  async elementAttribute(elementId, attribute) {
+    return this.session('GET', `/element/${elementId}/attribute/${encodeURIComponent(attribute)}`);
+  }
+
+  async click(elementId) {
+    return this.session('POST', `/element/${elementId}/click`, {});
+  }
+
+  async sendKeys(elementId, text) {
+    return this.session('POST', `/element/${elementId}/value`, { text });
+  }
+
+  async elementMatches(elementId, selector) {
+    if (!selector) return false;
+    return this.session('POST', '/execute/sync', {
+      script: 'return arguments[0].matches(arguments[1]);',
+      args: [{ [WEBDRIVER_ELEMENT_KEY]: elementId }, selector]
+    });
+  }
+
+  async getFirstChildText(elementId, selector) {
+    const children = await this.findElements(selector, elementId);
+    const childId = this.elementId(children[0]);
+    return childId ? this.elementText(childId) : '';
+  }
+
+  async getAttachmentUrls(elementId) {
+    const links = await this.findElements(this.config.attachmentSelector, elementId);
+    const urls = [];
+    for (const link of links) {
+      const href = await this.elementAttribute(this.elementId(link), 'href');
+      if (href) urls.push(href);
+    }
+    return [...new Set(urls)].map((url) => ({ url }));
+  }
+
+  eventId({ elementId, rawId, text, index }) {
+    return rawId || syntheticId('selenium-event', { elementId, text, index });
+  }
+
+  async getAuthenticatedUserId() {
+    return this.config.selfUserId;
+  }
+
+  isValidEventId(value) {
+    return typeof value === 'string' && value.length > 0;
+  }
+
+  async sendDm(conversationId, text) {
+    await this.navigateToConversation(conversationId);
+    const input = await this.waitForElement(this.config.messageInputSelector);
+    const inputId = this.elementId(input);
+    await this.click(inputId);
+    await this.sendKeys(inputId, text);
+    try {
+      const sendButton = await this.waitForElement(this.config.sendButtonSelector);
+      await this.click(this.elementId(sendButton));
+    } catch (error) {
+      this.logger?.warn({ err: error }, 'Selenium send button unavailable; trying Enter key');
+      await this.sendKeys(inputId, ENTER_KEY);
+    }
+    const id = syntheticId('selenium-sent', { text, sentAt: Date.now() });
+    this.recentSentTextHashes.add(syntheticId('text', { text }));
+    return { id, raw: { mode: 'selenium' } };
+  }
+
+  async listDmEvents(conversationId, { sinceId, maxResults = 50 } = {}) {
+    await this.navigateToConversation(conversationId);
+    await this.waitForElement(this.config.eventSelector);
+    const elements = await this.findElements(this.config.eventSelector);
+    const domEvents = [];
+    for (const [index, element] of elements.entries()) {
+      const id = this.elementId(element);
+      const text = (await this.getFirstChildText(id, this.config.messageTextSelector)) || await this.elementText(id);
+      if (!text.trim()) continue;
+      const rawId = await this.elementAttribute(id, this.config.eventIdAttribute);
+      const ownMessage = await this.elementMatches(id, this.config.ownMessageSelector);
+      const senderText = await this.getFirstChildText(id, this.config.senderSelector);
+      const eventId = this.eventId({ elementId: id, rawId, text, index });
+      domEvents.push({
+        id: eventId,
+        sender_id: ownMessage || this.recentSentTextHashes.has(syntheticId('text', { text })) ? this.config.selfUserId : `selenium-sender:${senderText || 'unknown'}`,
+        sender: { username: senderText || 'X user' },
+        text,
+        attachments: await this.getAttachmentUrls(id),
+        created_at: new Date().toISOString()
+      });
+    }
+    const newestFirst = domEvents.reverse();
+    const sinceIndex = sinceId ? newestFirst.findIndex((event) => event.id === sinceId) : -1;
+    const filtered = sinceIndex === -1 ? newestFirst : newestFirst.slice(0, sinceIndex);
+    return filtered.slice(0, maxResults);
+  }
+
+  async close() {
+    if (!this.sessionId) return;
+    try {
+      await this.webdriver('DELETE', `/session/${this.sessionId}`);
+    } finally {
+      this.sessionId = null;
+    }
+  }
+}
+
+export function createXClient({ config, logger }) {
+  if (config.x.mode === 'selenium') return new SeleniumXClient({ selenium: config.x.selenium, logger });
+  return new XApiClient({ accessToken: config.x.accessToken, apiBaseUrl: config.x.apiBaseUrl, logger });
+}
+
+export { XApiClient as XClient };

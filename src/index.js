@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { BridgeStore } from './store.js';
 import { BridgeRouter } from './bridge.js';
-import { XClient } from './xClient.js';
+import { createXClient } from './xClient.js';
 import { createDiscordClient } from './discord.js';
 import { createHealthServer } from './health.js';
 import { createLogger } from './logger.js';
@@ -11,13 +11,14 @@ const config = loadConfig();
 const logger = createLogger(config.logLevel);
 const store = new BridgeStore(config.sqlitePath);
 const discordClient = createDiscordClient();
-const xClient = new XClient({ accessToken: config.x.accessToken, apiBaseUrl: config.x.apiBaseUrl, logger });
+const xClient = createXClient({ config, logger });
+logger.info({ xClientMode: config.x.mode }, 'selected X client mode');
 const router = new BridgeRouter({ store, discordClient, xClient, logger, config });
 let polling = false;
 let pollTimer;
 
 function isValidXEventId(value) {
-  return typeof value === 'string' && /^\d+$/.test(value);
+  return xClient.isValidEventId?.(value) ?? (typeof value === 'string' && /^\d+$/.test(value));
 }
 
 async function pollX() {

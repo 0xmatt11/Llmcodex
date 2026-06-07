@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { BridgeRouter, renderForDiscord, renderForX, shouldBridge } from '../src/bridge.js';
-import { XClient } from '../src/xClient.js';
+import { loadConfig } from '../src/config.js';
+import { createXClient, SeleniumXClient, XApiClient, XClient } from '../src/xClient.js';
 
 class MemoryStore {
   constructor() {
@@ -209,6 +210,121 @@ test('XClient treats non-JSON retryable responses as retryable before parsing', 
     const client = new XClient({ accessToken: 'token', apiBaseUrl: 'https://api.example.test/2', logger: { warn() {} } });
     await assert.rejects(() => client.request('/test'), SyntaxError);
     assert.equal(attempts, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+
+test('loadConfig defaults to X API mode and requires API credentials', () => {
+  const config = loadConfig({
+    DISCORD_TOKEN: 'discord-token',
+    DISCORD_CHANNEL_ID: 'channel-1',
+    X_ACCESS_TOKEN: 'x-token',
+    X_DM_CONVERSATION_ID: 'dm-1'
+  });
+
+  assert.equal(config.x.mode, 'api');
+  assert.equal(config.x.accessToken, 'x-token');
+  assert.equal(config.x.apiBaseUrl, 'https://api.x.com/2');
+});
+
+test('loadConfig supports Selenium mode without an X API token', () => {
+  const config = loadConfig({
+    DISCORD_TOKEN: 'discord-token',
+    DISCORD_CHANNEL_ID: 'channel-1',
+    X_CLIENT_MODE: 'selenium',
+    X_DM_CONVERSATION_ID: 'dm-1',
+    X_SELENIUM_REMOTE_URL: 'http://selenium.example.test/wd/hub',
+    X_SELENIUM_HEADLESS: 'false'
+  });
+
+  assert.equal(config.x.mode, 'selenium');
+  assert.equal(config.x.accessToken, '');
+  assert.equal(config.x.selenium.remoteUrl, 'http://selenium.example.test/wd/hub');
+  assert.equal(config.x.selenium.headless, false);
+});
+
+test('loadConfig rejects unknown X client modes', () => {
+  assert.throws(() => loadConfig({
+    DISCORD_TOKEN: 'discord-token',
+    DISCORD_CHANNEL_ID: 'channel-1',
+    X_CLIENT_MODE: 'browser-ish'
+  }), /X_CLIENT_MODE must be one of/);
+});
+
+test('createXClient selects API or Selenium implementation from config', () => {
+  const logger = { info() {}, warn() {} };
+  const apiConfig = loadConfig({
+    DISCORD_TOKEN: 'discord-token',
+    DISCORD_CHANNEL_ID: 'channel-1',
+    X_ACCESS_TOKEN: 'x-token',
+    X_DM_CONVERSATION_ID: 'dm-1'
+  });
+  const seleniumConfig = loadConfig({
+    DISCORD_TOKEN: 'discord-token',
+    DISCORD_CHANNEL_ID: 'channel-1',
+    X_CLIENT_MODE: 'selenium',
+    X_DM_CONVERSATION_ID: 'dm-1'
+  });
+
+  assert.ok(createXClient({ config: apiConfig, logger }) instanceof XApiClient);
+  assert.ok(createXClient({ config: seleniumConfig, logger }) instanceof SeleniumXClient);
+});
+
+test('SeleniumXClient accepts non-numeric event IDs for cursor storage', () => {
+  const client = new SeleniumXClient({
+    logger: { info() {}, warn() {} },
+    selenium: loadConfig({
+      DISCORD_TOKEN: 'discord-token',
+      DISCORD_CHANNEL_ID: 'channel-1',
+      X_CLIENT_MODE: 'selenium',
+      X_DM_CONVERSATION_ID: 'dm-1'
+    }).x.selenium
+  });
+
+  assert.equal(client.isValidEventId('selenium-event:abc123'), true);
+  assert.equal(client.isValidEventId(''), false);
+});
+
+test('SeleniumXClient sends DMs through WebDriver protocol', async () => {
+  const originalFetch = globalThis.fetch;
+  const requests = [];
+  globalThis.fetch = async (url, options = {}) => {
+    const request = { url: String(url), method: options.method, body: options.body ? JSON.parse(options.body) : undefined };
+    requests.push(request);
+    if (request.url.endsWith('/session') && request.method === 'POST') {
+      return Response.json({ value: { sessionId: 'session-1' } });
+    }
+    if (request.url.endsWith('/url')) return Response.json({ value: null });
+    if (request.url.endsWith('/element') && request.body?.value === '[data-testid="dmComposerTextInput"]') {
+      return Response.json({ value: { 'element-6066-11e4-a52e-4f735466cecf': 'input-1' } });
+    }
+    if (request.url.endsWith('/element') && request.body?.value === '[data-testid="dmComposerSendButton"]') {
+      return Response.json({ value: { 'element-6066-11e4-a52e-4f735466cecf': 'send-1' } });
+    }
+    if (request.url.endsWith('/click') || request.url.endsWith('/value')) return Response.json({ value: null });
+    return Response.json({ value: { error: 'unknown command', message: request.url } }, { status: 500 });
+  };
+
+  try {
+    const client = new SeleniumXClient({
+      logger: { info() {}, warn() {} },
+      selenium: loadConfig({
+        DISCORD_TOKEN: 'discord-token',
+        DISCORD_CHANNEL_ID: 'channel-1',
+        X_CLIENT_MODE: 'selenium',
+        X_DM_CONVERSATION_ID: 'dm-1',
+        X_SELENIUM_REMOTE_URL: 'http://webdriver.test/wd/hub'
+      }).x.selenium
+    });
+
+    const result = await client.sendDm('dm-1', 'hello from selenium');
+
+    assert.match(result.id, /^selenium-sent:/);
+    assert.ok(requests.some((request) => request.url.endsWith('/url') && request.body.url === 'https://x.com/messages/dm-1'));
+    assert.ok(requests.some((request) => request.url.endsWith('/value') && request.body.text === 'hello from selenium'));
+    assert.ok(requests.some((request) => request.url.endsWith('/click')));
   } finally {
     globalThis.fetch = originalFetch;
   }

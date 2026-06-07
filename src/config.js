@@ -16,7 +16,7 @@ function intFromEnv(env, name, fallback) {
 }
 
 export function loadConfig(env = process.env) {
-  const missing = REQUIRED.filter((name) => !env[name]);
+  const missing = REQUIRED.filter((name) => !env[name]?.trim?.());
   if (missing.length > 0) {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
   }
@@ -28,12 +28,12 @@ export function loadConfig(env = process.env) {
     sqlitePath: env.SQLITE_PATH ?? './data/bridge.sqlite',
     publicBaseUrl: env.BRIDGE_PUBLIC_BASE_URL ?? '',
     discord: {
-      token: env.DISCORD_TOKEN,
-      channelId: env.DISCORD_CHANNEL_ID
+      token: env.DISCORD_TOKEN.trim(),
+      channelId: env.DISCORD_CHANNEL_ID.trim()
     },
     x: {
-      accessToken: env.X_ACCESS_TOKEN,
-      conversationId: env.X_DM_CONVERSATION_ID,
+      accessToken: env.X_ACCESS_TOKEN.trim(),
+      conversationId: env.X_DM_CONVERSATION_ID.trim(),
       apiBaseUrl: env.X_API_BASE_URL ?? 'https://api.x.com/2',
       pollIntervalMs: intFromEnv(env, 'X_POLL_INTERVAL_MS', 15000),
       pollLimit: intFromEnv(env, 'X_POLL_LIMIT', 50),

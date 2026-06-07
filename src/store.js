@@ -45,6 +45,10 @@ export class BridgeStore {
     return this.db.prepare('INSERT OR IGNORE INTO dedupe_events(event_key) VALUES (?)').run(eventKey).changes === 1;
   }
 
+  releaseEvent(eventKey) {
+    return this.db.prepare('DELETE FROM dedupe_events WHERE event_key = ?').run(eventKey).changes === 1;
+  }
+
   getMapping(source, sourceMessageId, target) {
     return this.db.prepare(
       'SELECT * FROM messages WHERE source = ? AND source_message_id = ? AND target = ?'

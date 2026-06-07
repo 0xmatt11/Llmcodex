@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { BridgeRouter, renderForDiscord, renderForX, shouldBridge } from '../src/bridge.js';
+import { XClient } from '../src/xClient.js';
 
 class MemoryStore {
   constructor() {
@@ -21,6 +22,10 @@ class MemoryStore {
     if (this.events.has(key)) return false;
     this.events.add(key);
     return true;
+  }
+
+  releaseEvent(key) {
+    return this.events.delete(key);
   }
 
   recordMapping(mapping) {
@@ -135,4 +140,76 @@ test('renderers include attachment links and placeholders', () => {
   assert.match(renderForX(message), /omitted/);
   assert.match(renderForDiscord(message), /@​everyone/);
   assert.match(renderForDiscord(message), /unavailable/);
+});
+
+
+test('BridgeRouter releases Discord-to-X dedupe reservation when send fails', async () => {
+  const store = new MemoryStore();
+  let attempts = 0;
+  const router = new BridgeRouter({
+    store,
+    xClient: {
+      sendDm: async () => {
+        attempts += 1;
+        throw new Error('x unavailable');
+      }
+    },
+    discordClient: { user: { id: 'bot-1' } },
+    logger: { info() {}, warn() {} },
+    config: { discord: { channelId: 'channel-1' }, x: { conversationId: 'dm-1', maxAttachmentLinks: 4 } }
+  });
+
+  await assert.rejects(() => router.bridgeDiscordMessage(discordMessage()), /x unavailable/);
+  await assert.rejects(() => router.bridgeDiscordMessage(discordMessage()), /x unavailable/);
+
+  assert.equal(attempts, 2);
+});
+
+test('BridgeRouter disables Discord mentions and releases X-to-Discord dedupe reservation when send fails', async () => {
+  const store = new MemoryStore();
+  const sentMessages = [];
+  let fail = true;
+  const discordClient = {
+    channels: {
+      fetch: async () => ({
+        send: async (payload) => {
+          sentMessages.push(payload);
+          if (fail) throw new Error('discord unavailable');
+          return { id: 'd-sent' };
+        }
+      })
+    }
+  };
+  const router = new BridgeRouter({
+    store,
+    discordClient,
+    xClient: { getAuthenticatedUserId: async () => 'x-self' },
+    logger: { info() {}, warn() {} },
+    config: { discord: { channelId: 'channel-1' }, x: { conversationId: 'dm-1', maxAttachmentLinks: 4 } }
+  });
+
+  await assert.rejects(() => router.bridgeXMessage({ id: 'x2', sender_id: 'x-other', text: '@everyone hello' }), /discord unavailable/);
+  fail = false;
+  const result = await router.bridgeXMessage({ id: 'x2', sender_id: 'x-other', text: '@everyone hello' });
+
+  assert.equal(result.bridged, true);
+  assert.deepEqual(sentMessages.at(-1).allowedMentions, { parse: [] });
+  assert.match(sentMessages.at(-1).content, /@​everyone/);
+});
+
+test('XClient treats non-JSON retryable responses as retryable before parsing', async () => {
+  const originalFetch = globalThis.fetch;
+  let attempts = 0;
+  globalThis.fetch = async () => {
+    attempts += 1;
+    return new Response('not json', { status: attempts === 1 ? 500 : 200, headers: { 'content-type': 'text/plain' } });
+  };
+
+  try {
+    const client = new XClient({ accessToken: 'token', apiBaseUrl: 'https://api.example.test/2', logger: { warn() {} } });
+    await assert.rejects(() => client.request('/test'), SyntaxError);
+    assert.equal(attempts, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

@@ -11,14 +11,14 @@ export class RetryableHttpError extends Error {
   }
 }
 
-export async function withRetry(fn, { attempts = 4, baseDelayMs = 500, maxDelayMs = 10000, logger } = {}) {
+export async function withRetry(fn, { attempts = 4, baseDelayMs = 500, maxDelayMs = 10000, logger, isRetryable } = {}) {
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
       return await fn(attempt);
     } catch (error) {
       lastError = error;
-      const retryable = error instanceof RetryableHttpError || ['ETIMEDOUT', 'ECONNRESET', 'ENOTFOUND'].includes(error.code);
+      const retryable = isRetryable?.(error) ?? (error instanceof RetryableHttpError || ['ETIMEDOUT', 'ECONNRESET', 'ENOTFOUND'].includes(error.code));
       if (!retryable || attempt === attempts) throw error;
       const exponential = Math.min(maxDelayMs, baseDelayMs * 2 ** (attempt - 1));
       const delay = error.retryAfterMs ?? Math.round(exponential * (0.75 + Math.random() / 2));

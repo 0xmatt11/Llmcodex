@@ -16,11 +16,19 @@ const router = new BridgeRouter({ store, discordClient, xClient, logger, config 
 let polling = false;
 let pollTimer;
 
+function isValidXEventId(value) {
+  return typeof value === 'string' && /^\d+$/.test(value);
+}
+
 async function pollX() {
   if (polling) return;
   polling = true;
   try {
-    const sinceId = store.getCursor('x_dm_since_id');
+    const storedSinceId = store.getCursor('x_dm_since_id');
+    const sinceId = isValidXEventId(storedSinceId) ? storedSinceId : undefined;
+    if (storedSinceId && !sinceId) {
+      logger.warn({ storedSinceId }, 'ignoring invalid X DM cursor');
+    }
     const events = await xClient.listDmEvents(config.x.conversationId, {
       sinceId,
       maxResults: config.x.pollLimit
@@ -57,13 +65,28 @@ await discordClient.login(config.discord.token);
 pollTimer = setInterval(pollX, config.x.pollIntervalMs);
 pollX();
 
+async function closeServer() {
+  await new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
 async function shutdown(signal) {
   logger.info({ signal }, 'shutting down');
   clearInterval(pollTimer);
-  server.close();
-  discordClient.destroy();
-  store.close();
-  process.exit(0);
+  try {
+    await closeServer();
+    discordClient.destroy();
+    await xClient.close();
+    store.close();
+    process.exit(0);
+  } catch (error) {
+    logger.error({ err: error }, 'failed graceful shutdown');
+    process.exit(1);
+  }
 }
 
 process.on('SIGINT', shutdown);

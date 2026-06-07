@@ -5,7 +5,7 @@ export function createHealthServer({ logger, store, discordClient }) {
   const app = express();
   app.use(pinoHttp({ logger }));
 
-  app.get('/healthz', (_req, res) => {
+  app.get('/healthz', (req, res) => {
     try {
       store.db.prepare('SELECT 1').get();
       res.json({
@@ -14,7 +14,8 @@ export function createHealthServer({ logger, store, discordClient }) {
         uptimeSeconds: Math.round(process.uptime())
       });
     } catch (error) {
-      res.status(500).json({ ok: false, error: error.message });
+      req.log?.error({ err: error }, 'health check failed');
+      res.status(500).json({ ok: false, error: 'health check failed' });
     }
   });
 

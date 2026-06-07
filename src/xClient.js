@@ -25,12 +25,21 @@ export class XClient {
         body: body ? JSON.stringify(body) : undefined
       });
       const text = await response.text();
-      const payload = text ? JSON.parse(text) : {};
       if (response.status === 429 || response.status >= 500) {
         throw new RetryableHttpError(`X API retryable status ${response.status}`, {
           status: response.status,
           retryAfterMs: retryAfterMs(response.headers)
         });
+      }
+      let payload = {};
+      if (text) {
+        try {
+          payload = JSON.parse(text);
+        } catch (error) {
+          error.responseText = text;
+          error.status = response.status;
+          throw error;
+        }
       }
       if (!response.ok) {
         const error = new Error(`X API status ${response.status}`);
@@ -55,6 +64,10 @@ export class XClient {
       body: { text }
     });
     return { id: payload.data?.dm_event_id ?? payload.data?.id ?? payload.id, raw: payload };
+  }
+
+  async close() {
+    // API client currently owns no persistent resources.
   }
 
   async listDmEvents(conversationId, { sinceId, maxResults = 50 } = {}) {

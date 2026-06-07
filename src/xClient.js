@@ -333,30 +333,22 @@ export class SeleniumXClient {
     const elements = await this.findElements(this.config.eventSelector);
     const domEvents = [];
     for (const [index, element] of elements.entries()) {
-      try {
-        const id = this.elementId(element);
-        const text = (await this.getFirstChildText(id, this.config.messageTextSelector)) || await this.elementText(id);
-        if (!text.trim()) continue;
-        const rawId = await this.elementAttribute(id, this.config.eventIdAttribute);
-        const ownMessage = await this.elementMatches(id, this.config.ownMessageSelector);
-        const senderText = await this.getFirstChildText(id, this.config.senderSelector);
-        const attachments = await this.getAttachmentUrls(id);
-        const eventId = this.eventId({ rawId, text, index, senderText, ownMessage, attachmentUrls: attachments });
-        domEvents.push({
-          id: eventId,
-          sender_id: ownMessage || this.recentSentTextHashes.has(syntheticId('text', { text })) ? this.config.selfUserId : `selenium-sender:${senderText || 'unknown'}`,
-          sender: { username: senderText || 'X user' },
-          text,
-          attachments,
-          created_at: new Date().toISOString()
-        });
-      } catch (error) {
-        if (isTransientWebDriverError(error)) {
-          this.logger?.warn({ err: error, index }, 'skipping transient Selenium message element read failure');
-          continue;
-        }
-        throw error;
-      }
+      const id = this.elementId(element);
+      const text = (await this.getFirstChildText(id, this.config.messageTextSelector)) || await this.elementText(id);
+      if (!text.trim()) continue;
+      const rawId = await this.elementAttribute(id, this.config.eventIdAttribute);
+      const ownMessage = await this.elementMatches(id, this.config.ownMessageSelector);
+      const senderText = await this.getFirstChildText(id, this.config.senderSelector);
+      const attachments = await this.getAttachmentUrls(id);
+      const eventId = this.eventId({ rawId, text, index, senderText, ownMessage, attachmentUrls: attachments });
+      domEvents.push({
+        id: eventId,
+        sender_id: ownMessage || this.recentSentTextHashes.has(syntheticId('text', { text })) ? this.config.selfUserId : `selenium-sender:${senderText || 'unknown'}`,
+        sender: { username: senderText || 'X user' },
+        text,
+        attachments,
+        created_at: new Date().toISOString()
+      });
     }
     const newestFirst = domEvents.reverse();
     const sinceIndex = sinceId ? newestFirst.findIndex((event) => event.id === sinceId) : -1;

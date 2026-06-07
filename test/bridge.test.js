@@ -213,3 +213,59 @@ test('XClient treats non-JSON retryable responses as retryable before parsing', 
     globalThis.fetch = originalFetch;
   }
 });
+
+test('XClient supplements API DM events with Selenium events', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ data: [{ id: 'api-1', text: 'from api' }] }), { status: 200 });
+  const seleniumCalls = [];
+  const seleniumClient = {
+    listDmEvents: async (conversationId, options) => {
+      seleniumCalls.push({ conversationId, options });
+      return [{ id: 'web-1', text: 'from selenium' }];
+    }
+  };
+
+  try {
+    const client = new XClient({
+      accessToken: 'token',
+      apiBaseUrl: 'https://api.example.test/2',
+      logger: { warn() {} },
+      seleniumClient,
+      seleniumDmUrl: 'https://x.com/messages/custom'
+    });
+    const events = await client.listDmEvents('dm-1', { maxResults: 10 });
+
+    assert.deepEqual(events.map((event) => event.id), ['api-1', 'web-1']);
+    assert.deepEqual(seleniumCalls, [{
+      conversationId: 'dm-1',
+      options: { maxResults: 10, dmUrl: 'https://x.com/messages/custom' }
+    }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('XClient can fall back to Selenium sends when API send fails', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ errors: [{ detail: 'forbidden' }] }), { status: 403 });
+  const seleniumClient = {
+    sendDm: async (conversationId, text, options) => ({ id: `selenium-${conversationId}-${text.length}`, options })
+  };
+
+  try {
+    const client = new XClient({
+      accessToken: 'token',
+      apiBaseUrl: 'https://api.example.test/2',
+      logger: { warn() {} },
+      seleniumClient,
+      seleniumSendFallback: true,
+      seleniumDmUrl: 'https://x.com/messages/custom'
+    });
+    const result = await client.sendDm('dm-1', 'hello');
+
+    assert.equal(result.id, 'selenium-dm-1-5');
+    assert.deepEqual(result.options, { dmUrl: 'https://x.com/messages/custom' });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

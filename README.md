@@ -7,6 +7,7 @@ A production-ready Node.js service that bridges one configured Discord channel w
 - Discord bot listens to exactly one configured channel.
 - X/Twitter DM group chat bridge in both directions.
 - OAuth 2.0 user-context bearer token support for X DM read/write access.
+- Optional Selenium WebDriver supplement for X web DM scraping and API-send fallback when API access is incomplete or degraded.
 - SQLite persistence for message mappings, cursors, and dedupe event state.
 - Echo-loop protection for bot/self messages, already-bridged message IDs, and duplicate in-flight events.
 - Attachment support:
@@ -39,7 +40,8 @@ A production-ready Node.js service that bridges one configured Discord channel w
 5. Complete the OAuth consent flow as the X user that belongs to the target group DM.
 6. Set `X_ACCESS_TOKEN` to the resulting user access token.
 7. Set `X_DM_CONVERSATION_ID` to the group DM conversation ID.
-8. If X changes endpoint hostnames or paths for your access tier, set `X_API_BASE_URL` and adapt `src/xClient.js`; all X access is isolated there.
+8. If X changes endpoint hostnames or paths for your access tier, set `X_API_BASE_URL` and adapt `src/xClient.js`; all X API access is isolated there.
+9. Optional: enable Selenium with `X_SELENIUM_ENABLED=true` when you also need X web DM visibility. Selenium is supplemental: the bridge still uses the official X API for authenticated API calls and can use Selenium as a fallback sender only when `X_SELENIUM_SEND_FALLBACK=true`.
 
 > Production note: prefer a secret manager and a token refresh job for short-lived OAuth access tokens. Do not commit tokens to git or bake them into Docker images.
 
@@ -75,6 +77,13 @@ cp .env.example .env
 | `X_POLL_INTERVAL_MS` | No | X DM poll interval, default `15000`. |
 | `X_POLL_LIMIT` | No | Max events requested per poll, default `50`. |
 | `X_MAX_ATTACHMENT_LINKS` | No | Max Discord attachment links appended to each X DM, default `4`. |
+| `X_SELENIUM_ENABLED` | No | Enables Selenium WebDriver integration for supplemental X web DM reads, default `false`. |
+| `X_SELENIUM_REMOTE_URL` | No | Selenium server URL, default `http://localhost:4444`. |
+| `X_SELENIUM_BROWSER` | No | Browser name requested from Selenium, default `chrome`. |
+| `X_SELENIUM_HEADLESS` | No | Requests headless browser mode for new Selenium sessions, default `true`. |
+| `X_SELENIUM_TIMEOUT_MS` | No | Selenium element wait timeout, default `10000`. |
+| `X_SELENIUM_DM_URL` | No | Optional explicit X DM URL to open instead of `https://x.com/messages/{X_DM_CONVERSATION_ID}`. |
+| `X_SELENIUM_SEND_FALLBACK` | No | If true, falls back to Selenium web send when the X API send fails, default `false` to avoid accidental duplicate sends. |
 
 ## Local Development
 
@@ -85,7 +94,7 @@ npm run lint
 npm start
 ```
 
-The service loads `.env`, opens the SQLite store, starts the health server, logs in the Discord bot, and then polls the configured X DM conversation. Discord messages are bridged from the configured channel as `messageCreate` events arrive.
+The service loads `.env`, opens the SQLite store, starts the health server, logs in the Discord bot, and then polls the configured X DM conversation through the X API. When Selenium is enabled, each X poll is supplemented with events scraped from X web through Selenium WebDriver. Discord messages are bridged from the configured channel as `messageCreate` events arrive.
 
 ## Docker Deployment
 
@@ -123,6 +132,7 @@ Example response:
 - X DM polling uses a stored cursor named `x_dm_since_id`. The cursor is used only when it looks like a numeric X event ID; invalid stored cursor values are ignored and logged. Deleting the SQLite database can cause old messages to be seen again.
 - Bridged X messages are posted to Discord with mentions disabled and `@` characters escaped to reduce accidental pings.
 - Discord attachments are represented as links because the X DM API may not accept arbitrary uploaded media for every account/tier/API version.
+- Selenium mode requires an external Selenium server/browser that can access X web and is already authenticated (for example through a prepared browser profile/session). X web selectors are best-effort and may need updates when X changes its UI.
 
 ## Test Coverage
 

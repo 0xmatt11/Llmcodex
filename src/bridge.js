@@ -10,7 +10,8 @@ export function contentHash({ source, id, text, attachments = [] }) {
 }
 
 export function normalizeDiscordMessage(message) {
-  const attachments = [...message.attachments.values()].map((attachment) => ({
+  const attachmentValues = message.attachments?.values ? [...message.attachments.values()] : [];
+  const attachments = attachmentValues.map((attachment) => ({
     name: attachment.name,
     url: attachment.url,
     contentType: attachment.contentType
@@ -52,7 +53,7 @@ export function renderForX(message, { maxAttachmentLinks = 4 } = {}) {
 }
 
 export function renderForDiscord(message) {
-  const parts = [`**${escapeDiscord(message.authorName)} from X:**`, message.text].filter(Boolean);
+  const parts = [`**${escapeDiscord(message.authorName)} from X:**`, escapeDiscord(message.text)].filter(Boolean);
   const links = message.attachments.map((attachment) => attachment.url).filter(Boolean);
   if (links.length > 0) parts.push(`Attachments: ${links.join(' ')}`);
   if (message.attachments.length > links.length) {
@@ -72,6 +73,19 @@ export function shouldBridge({ store, source, sourceMessageId, target, authorId,
   const eventKey = `${source}:${sourceMessageId}:${target}`;
   if (!store.recordEvent(eventKey)) return { bridge: false, reason: 'duplicate_event' };
   return { bridge: true, eventKey };
+}
+
+function releaseDedupeReservation(store, eventKey, logger) {
+  if (!eventKey || typeof store.releaseEvent !== 'function') return;
+  try {
+    store.releaseEvent(eventKey);
+  } catch (error) {
+    logger?.warn({ err: error, eventKey }, 'failed to release dedupe reservation');
+  }
+}
+
+function hasContent(text) {
+  return typeof text === 'string' && text.trim().length > 0;
 }
 
 export class BridgeRouter {
@@ -98,7 +112,18 @@ export class BridgeRouter {
     if (!decision.bridge) return { skipped: decision.reason };
 
     const text = renderForX(normalized, { maxAttachmentLinks: this.config.x.maxAttachmentLinks });
-    const sent = await this.xClient.sendDm(this.config.x.conversationId, text);
+    if (!hasContent(text)) {
+      releaseDedupeReservation(this.store, decision.eventKey, this.logger);
+      return { skipped: 'empty_message' };
+    }
+
+    let sent;
+    try {
+      sent = await this.xClient.sendDm(this.config.x.conversationId, text);
+    } catch (error) {
+      releaseDedupeReservation(this.store, decision.eventKey, this.logger);
+      throw error;
+    }
     this.store.recordMapping({
       source: SOURCE_DISCORD,
       sourceMessageId: normalized.id,
@@ -123,8 +148,21 @@ export class BridgeRouter {
     });
     if (!decision.bridge) return { skipped: decision.reason };
 
-    const channel = await this.discordClient.channels.fetch(this.config.discord.channelId);
-    const sent = await channel.send({ content: renderForDiscord(normalized) });
+    const content = renderForDiscord(normalized);
+    if (!hasContent(content)) {
+      releaseDedupeReservation(this.store, decision.eventKey, this.logger);
+      return { skipped: 'empty_message' };
+    }
+
+    let channel;
+    let sent;
+    try {
+      channel = await this.discordClient.channels.fetch(this.config.discord.channelId);
+      sent = await channel.send({ content, allowedMentions: { parse: [] } });
+    } catch (error) {
+      releaseDedupeReservation(this.store, decision.eventKey, this.logger);
+      throw error;
+    }
     this.store.recordMapping({
       source: SOURCE_X,
       sourceMessageId: normalized.id,

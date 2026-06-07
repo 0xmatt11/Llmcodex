@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { BridgeStore } from './store.js';
 import { BridgeRouter } from './bridge.js';
 import { XClient } from './xClient.js';
+import { SeleniumXClient } from './xSeleniumClient.js';
 import { createDiscordClient } from './discord.js';
 import { createHealthServer } from './health.js';
 import { createLogger } from './logger.js';
@@ -11,7 +12,23 @@ const config = loadConfig();
 const logger = createLogger(config.logLevel);
 const store = new BridgeStore(config.sqlitePath);
 const discordClient = createDiscordClient();
-const xClient = new XClient({ accessToken: config.x.accessToken, apiBaseUrl: config.x.apiBaseUrl, logger });
+const seleniumClient = config.x.selenium.enabled
+  ? new SeleniumXClient({
+    remoteUrl: config.x.selenium.remoteUrl,
+    browserName: config.x.selenium.browserName,
+    headless: config.x.selenium.headless,
+    timeoutMs: config.x.selenium.timeoutMs,
+    logger
+  })
+  : null;
+const xClient = new XClient({
+  accessToken: config.x.accessToken,
+  apiBaseUrl: config.x.apiBaseUrl,
+  logger,
+  seleniumClient,
+  seleniumSendFallback: config.x.selenium.sendFallback,
+  seleniumDmUrl: config.x.selenium.dmUrl
+});
 const router = new BridgeRouter({ store, discordClient, xClient, logger, config });
 let polling = false;
 let pollTimer;
@@ -37,7 +54,7 @@ async function pollX() {
     for (const event of ordered) {
       await router.bridgeXMessage(event);
     }
-    const newest = events[0]?.id ?? events[0]?.dm_event_id;
+    const newest = events.map((event) => event.id ?? event.dm_event_id).find(isValidXEventId);
     if (newest) store.setCursor('x_dm_since_id', newest);
   } catch (error) {
     logger.error({ err: error }, 'failed to poll X DM events');

@@ -248,8 +248,14 @@ export class SeleniumXClient {
     return [...new Set(urls)].map((url) => ({ url }));
   }
 
-  eventId({ elementId, rawId, text, index }) {
-    return rawId || syntheticId('selenium-event', { elementId, text, index });
+  eventId({ rawId, text, index, senderText, ownMessage, attachmentUrls = [] }) {
+    if (rawId) return rawId;
+    return syntheticId('selenium-event', {
+      text,
+      index,
+      sender: ownMessage ? this.config.selfUserId : senderText || 'unknown',
+      attachments: attachmentUrls.map(({ url }) => url).filter(Boolean).sort()
+    });
   }
 
   async getAuthenticatedUserId() {
@@ -290,13 +296,14 @@ export class SeleniumXClient {
       const rawId = await this.elementAttribute(id, this.config.eventIdAttribute);
       const ownMessage = await this.elementMatches(id, this.config.ownMessageSelector);
       const senderText = await this.getFirstChildText(id, this.config.senderSelector);
-      const eventId = this.eventId({ elementId: id, rawId, text, index });
+      const attachments = await this.getAttachmentUrls(id);
+      const eventId = this.eventId({ rawId, text, index, senderText, ownMessage, attachmentUrls: attachments });
       domEvents.push({
         id: eventId,
         sender_id: ownMessage || this.recentSentTextHashes.has(syntheticId('text', { text })) ? this.config.selfUserId : `selenium-sender:${senderText || 'unknown'}`,
         sender: { username: senderText || 'X user' },
         text,
-        attachments: await this.getAttachmentUrls(id),
+        attachments,
         created_at: new Date().toISOString()
       });
     }

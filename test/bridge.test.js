@@ -272,6 +272,38 @@ test('createXClient selects API or Selenium implementation from config', () => {
   assert.ok(createXClient({ config: seleniumConfig, logger }) instanceof SeleniumXClient);
 });
 
+test('SeleniumXClient builds synthetic event IDs from stable message data', () => {
+  const client = new SeleniumXClient({
+    logger: { info() {}, warn() {} },
+    selenium: loadConfig({
+      DISCORD_TOKEN: 'discord-token',
+      DISCORD_CHANNEL_ID: 'channel-1',
+      X_CLIENT_MODE: 'selenium',
+      X_DM_CONVERSATION_ID: 'dm-1',
+      X_SELENIUM_SELF_USER_ID: 'self-user'
+    }).x.selenium
+  });
+
+  const first = client.eventId({
+    elementId: 'transient-webdriver-element-1',
+    text: 'stable message',
+    index: 3,
+    senderText: 'Ada',
+    attachmentUrls: [{ url: 'https://example.test/a.png' }]
+  });
+  const second = client.eventId({
+    elementId: 'transient-webdriver-element-2',
+    text: 'stable message',
+    index: 3,
+    senderText: 'Ada',
+    attachmentUrls: [{ url: 'https://example.test/a.png' }]
+  });
+
+  assert.equal(first, second);
+  assert.notEqual(client.eventId({ text: 'stable message', index: 3, senderText: 'Grace' }), first);
+  assert.equal(client.eventId({ rawId: 'native-id-1', text: 'ignored', index: 0 }), 'native-id-1');
+});
+
 test('SeleniumXClient accepts non-numeric event IDs for cursor storage', () => {
   const client = new SeleniumXClient({
     logger: { info() {}, warn() {} },

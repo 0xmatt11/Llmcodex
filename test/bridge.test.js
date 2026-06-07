@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { BridgeRouter, renderForDiscord, renderForX, shouldBridge } from '../src/bridge.js';
 import { XClient } from '../src/xClient.js';
+import { SeleniumXClient } from '../src/xSeleniumClient.js';
 
 class MemoryStore {
   constructor() {
@@ -243,6 +244,64 @@ test('XClient supplements API DM events with Selenium events', async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('XClient deduplicates API and Selenium copies of the same DM text', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    data: [
+      { id: '123', sender_id: 'x-other', text: 'same visible DM' },
+      { id: '124', sender_id: 'x-other', text: 'api only' }
+    ]
+  }), { status: 200 });
+  const seleniumClient = {
+    listDmEvents: async () => [
+      { id: 'selenium-duplicate', text: 'same\nvisible   DM', source: 'selenium' },
+      { id: 'selenium-only', text: 'web only', source: 'selenium' }
+    ]
+  };
+
+  try {
+    const client = new XClient({
+      accessToken: 'token',
+      apiBaseUrl: 'https://api.example.test/2',
+      logger: { warn() {} },
+      seleniumClient
+    });
+    const events = await client.listDmEvents('dm-1');
+
+    assert.deepEqual(events.map((event) => event.id), ['123', '124', 'selenium-only']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('SeleniumXClient filters outgoing web DM entries from polled events', async () => {
+  class FakeSeleniumXClient extends SeleniumXClient {
+    constructor() {
+      super({ remoteUrl: 'http://selenium.example.test', logger: { debug() {} } });
+      this.elements = [
+        { id: 'incoming', description: { text: 'from x user', outgoing: false, incoming: true } },
+        { id: 'outgoing', description: { text: 'sent by bridge', outgoing: true, incoming: false } }
+      ];
+    }
+
+    async navigate() {}
+
+    async waitForElements() {
+      return this.elements;
+    }
+
+    async describeMessageElement(element) {
+      return element.description;
+    }
+  }
+
+  const client = new FakeSeleniumXClient();
+  const events = await client.listDmEvents('dm-1');
+
+  assert.deepEqual(events.map((event) => event.text), ['from x user']);
+  assert.equal(events[0].sender_id, undefined);
 });
 
 test('XClient can fall back to Selenium sends when API send fails', async () => {

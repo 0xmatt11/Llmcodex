@@ -103,14 +103,45 @@ export class XClient {
   }
 }
 
+function eventId(event) {
+  return event.id ?? event.dm_event_id;
+}
+
+function eventText(event) {
+  return event.text ?? event.message_create?.message_data?.text ?? '';
+}
+
+function normalizeDedupeText(text) {
+  return String(text).replace(/\s+/g, ' ').trim();
+}
+
+function textDedupeKey(event) {
+  const text = normalizeDedupeText(eventText(event));
+  return text ? `text:${text}` : null;
+}
+
 function mergeDmEvents(apiEvents, seleniumEvents) {
-  const seen = new Set();
+  const seenIds = new Set();
+  const apiTextKeys = new Set();
   const merged = [];
-  for (const event of [...apiEvents, ...seleniumEvents]) {
-    const key = event.id ?? event.dm_event_id ?? `${event.sender_id ?? ''}:${event.text ?? ''}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+
+  for (const event of apiEvents) {
+    const id = eventId(event);
+    if (id && seenIds.has(id)) continue;
+    if (id) seenIds.add(id);
+    const textKey = textDedupeKey(event);
+    if (textKey) apiTextKeys.add(textKey);
     merged.push(event);
   }
+
+  for (const event of seleniumEvents) {
+    const id = eventId(event);
+    if (id && seenIds.has(id)) continue;
+    const textKey = textDedupeKey(event);
+    if (textKey && apiTextKeys.has(textKey)) continue;
+    if (id) seenIds.add(id);
+    merged.push(event);
+  }
+
   return merged;
 }

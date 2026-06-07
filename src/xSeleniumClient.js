@@ -4,7 +4,9 @@ const DEFAULT_SELECTORS = {
   message: '[data-testid="cellInnerDiv"], [data-testid="messageEntry"], [data-testid="DMDrawerMessage"]',
   messageText: '[data-testid="tweetText"], [dir="auto"]',
   composer: '[data-testid="dmComposerTextInput"], [role="textbox"]',
-  sendButton: '[data-testid="dmComposerSendButton"], [data-testid="sendDMFromMessageEntry"]'
+  sendButton: '[data-testid="dmComposerSendButton"], [data-testid="sendDMFromMessageEntry"]',
+  outgoingMessage: '[data-testid*="outgoing" i], [data-testid*="sent-by-you" i], [aria-label*="You sent" i], [aria-label*="sent by you" i]',
+  incomingMessage: '[data-testid*="incoming" i], [data-testid*="received" i], [aria-label*="received" i]'
 };
 
 function sleep(ms) {
@@ -100,6 +102,40 @@ export class SeleniumXClient {
     });
   }
 
+  async executeScript(script, args = []) {
+    return this.command('/execute/sync', {
+      method: 'POST',
+      body: { script, args }
+    });
+  }
+
+  async describeMessageElement(element) {
+    return this.executeScript(`
+      const element = arguments[0];
+      const outgoingSelector = arguments[1];
+      const incomingSelector = arguments[2];
+      const safeMatches = (selector) => {
+        if (!selector) return false;
+        try {
+          return Boolean(element.matches(selector) || element.closest(selector) || element.querySelector(selector));
+        } catch {
+          return false;
+        }
+      };
+      const labels = [element.getAttribute('aria-label'), ...Array.from(element.querySelectorAll('[aria-label]')).map((node) => node.getAttribute('aria-label'))]
+        .filter(Boolean)
+        .join(' ');
+      const markerText = labels + ' ' + (element.getAttribute('data-testid') || '');
+      const outgoingByMarker = /\b(you sent|sent by you|outgoing)\b/i.test(markerText);
+      const incomingByMarker = /\b(received|incoming)\b/i.test(markerText);
+      return {
+        text: (element.innerText || element.textContent || '').trim(),
+        outgoing: safeMatches(outgoingSelector) || outgoingByMarker,
+        incoming: safeMatches(incomingSelector) || incomingByMarker
+      };
+    `, [element, this.selectors.outgoingMessage, this.selectors.incomingMessage]);
+  }
+
   async waitForElements(selector) {
     const deadline = Date.now() + this.timeoutMs;
     let lastError;
@@ -123,12 +159,20 @@ export class SeleniumXClient {
   async listDmEvents(conversationId, { maxResults = 20, dmUrl } = {}) {
     await this.navigate(dmUrl ?? this.dmUrl(conversationId));
     const elements = await this.waitForElements(this.selectors.message);
-    const texts = [];
+    const messages = [];
     for (const element of elements.slice(-maxResults)) {
-      const text = (await this.getElementText(element)).trim();
-      if (text) texts.push(text);
+      let description;
+      try {
+        description = await this.describeMessageElement(element);
+      } catch (error) {
+        this.logger?.debug?.({ err: error }, 'failed to inspect Selenium DM message element; falling back to text extraction');
+        description = { text: (await this.getElementText(element)).trim(), outgoing: false };
+      }
+      if (description.outgoing && !description.incoming) continue;
+      const text = description.text.trim();
+      if (text) messages.push({ text });
     }
-    return texts.map((text, index) => ({
+    return messages.map(({ text }, index) => ({
       id: stableSeleniumEventId({ conversationId, text, index }),
       sender_id: undefined,
       sender: { username: 'X web' },

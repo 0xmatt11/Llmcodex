@@ -1,0 +1,7 @@
+node_modules/
+data/*.sqlite
+data/*.sqlite-*
+.env
+npm-debug.log*
+coverage/
+browser-data/

@@ -12,7 +12,11 @@ const logger = createLogger(config.logLevel);
 const store = new BridgeStore(config.sqlitePath);
 const discordClient = createDiscordClient();
 const xClient = createXClient({ config, logger });
-logger.info({ xClientMode: config.x.mode }, 'selected X client mode');
+const modeNotes = {
+  api: 'using official X API; requires X_ACCESS_TOKEN',
+  selenium: 'using Selenium/WebDriver; requires an authenticated browser session'
+};
+logger.info({ xClientMode: config.x.mode, note: modeNotes[config.x.mode] }, 'selected X client mode');
 const router = new BridgeRouter({ store, discordClient, xClient, logger, config });
 let polling = false;
 let pollTimer;

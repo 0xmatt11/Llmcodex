@@ -35,13 +35,16 @@ export function loadConfig(env = process.env) {
 
   const requiredNames = [...COMMON_REQUIRED];
   if (mode === 'api') requiredNames.push('X_ACCESS_TOKEN', 'X_DM_CONVERSATION_ID');
-  if (mode === 'selenium' && !env.X_DM_CONVERSATION_ID?.trim?.() && !env.X_SELENIUM_DM_URL?.trim?.()) {
-    requiredNames.push('X_DM_CONVERSATION_ID or X_SELENIUM_DM_URL');
-  }
 
   const missing = required(env, requiredNames);
   if (missing.length > 0) {
     throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
+  }
+
+  const hasDmConversationId = Boolean(env.X_DM_CONVERSATION_ID?.trim?.());
+  const hasSeleniumDmUrl = Boolean(env.X_SELENIUM_DM_URL?.trim?.());
+  if (mode === 'selenium' && !hasDmConversationId && !hasSeleniumDmUrl) {
+    throw new Error('Selenium mode requires either X_DM_CONVERSATION_ID or X_SELENIUM_DM_URL');
   }
 
   return {

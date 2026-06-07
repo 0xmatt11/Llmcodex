@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { BridgeRouter, renderForDiscord, renderForX, shouldBridge } from '../src/bridge.js';
+import { BridgeRouter, renderForDiscord, renderForX, shouldBridge, textHash } from '../src/bridge.js';
 import { loadConfig } from '../src/config.js';
 import { createXClient, SeleniumXClient, XApiClient, XClient } from '../src/xClient.js';
 
@@ -9,6 +9,7 @@ class MemoryStore {
     this.events = new Set();
     this.mappings = new Map();
     this.recorded = [];
+    this.outboundTextHashes = new Set();
   }
 
   key(source, id, target) {
@@ -32,6 +33,14 @@ class MemoryStore {
   recordMapping(mapping) {
     this.recorded.push(mapping);
     this.mappings.set(this.key(mapping.source, mapping.sourceMessageId, mapping.target), mapping);
+  }
+
+  recordOutboundMessage({ target, textHash }) {
+    this.outboundTextHashes.add(`${target}:${textHash}`);
+  }
+
+  hasOutboundTextHash(target, textHash) {
+    return this.outboundTextHashes.has(`${target}:${textHash}`);
   }
 }
 
@@ -100,6 +109,48 @@ test('BridgeRouter skips Discord messages from other channels and bots', async (
 
   assert.deepEqual(await router.bridgeDiscordMessage(discordMessage({ channelId: 'other' })), { skipped: 'wrong_channel' });
   assert.deepEqual(await router.bridgeDiscordMessage(discordMessage({ author: { id: 'bot-2', bot: true } })), { skipped: 'bot_message' });
+});
+
+test('BridgeRouter records Selenium outbound text hashes and skips matching self echoes', async () => {
+  const store = new MemoryStore();
+  const sentMessages = [];
+  const discordClient = {
+    user: { id: 'bot-1' },
+    channels: {
+      fetch: async () => ({
+        send: async (payload) => {
+          sentMessages.push(payload);
+          return { id: 'd-sent' };
+        }
+      })
+    }
+  };
+  const router = new BridgeRouter({
+    store,
+    discordClient,
+    xClient: {
+      sendDm: async (_conversationId, text) => ({ id: `selenium-sent-${text.length}` }),
+      getAuthenticatedUserId: async () => 'selenium-self'
+    },
+    logger: { info() {} },
+    config: { discord: { channelId: 'channel-1' }, x: { mode: 'selenium', conversationId: 'dm-1', maxAttachmentLinks: 4 } }
+  });
+
+  const discord = discordMessage({ content: 'persist me' });
+  await router.bridgeDiscordMessage(discord);
+  const echoedText = renderForX({
+    source: 'discord',
+    id: discord.id,
+    authorId: discord.author.id,
+    authorName: discord.author.username,
+    text: discord.content,
+    attachments: [],
+    createdAt: discord.createdAt.toISOString()
+  });
+
+  assert.equal(store.hasOutboundTextHash('x', textHash(echoedText)), true);
+  assert.deepEqual(await router.bridgeXMessage({ id: 'x-echo', sender_id: 'unknown', text: echoedText }), { skipped: 'self_message' });
+  assert.equal(sentMessages.length, 0);
 });
 
 test('BridgeRouter routes X DM events to Discord and records mapping', async () => {
@@ -245,6 +296,14 @@ test('loadConfig supports Selenium mode without an X API token', () => {
   assert.equal(config.x.selenium.headless, false);
 });
 
+test('loadConfig reports a clear Selenium DM target error', () => {
+  assert.throws(() => loadConfig({
+    DISCORD_TOKEN: 'discord-token',
+    DISCORD_CHANNEL_ID: 'channel-1',
+    X_CLIENT_MODE: 'selenium'
+  }), /Selenium mode requires either X_DM_CONVERSATION_ID or X_SELENIUM_DM_URL/);
+});
+
 test('loadConfig rejects unknown X client modes', () => {
   assert.throws(() => loadConfig({
     DISCORD_TOKEN: 'discord-token',
@@ -272,6 +331,38 @@ test('createXClient selects API or Selenium implementation from config', () => {
   assert.ok(createXClient({ config: seleniumConfig, logger }) instanceof SeleniumXClient);
 });
 
+test('SeleniumXClient builds synthetic event IDs from stable message data', () => {
+  const client = new SeleniumXClient({
+    logger: { info() {}, warn() {} },
+    selenium: loadConfig({
+      DISCORD_TOKEN: 'discord-token',
+      DISCORD_CHANNEL_ID: 'channel-1',
+      X_CLIENT_MODE: 'selenium',
+      X_DM_CONVERSATION_ID: 'dm-1',
+      X_SELENIUM_SELF_USER_ID: 'self-user'
+    }).x.selenium
+  });
+
+  const first = client.eventId({
+    elementId: 'transient-webdriver-element-1',
+    text: 'stable message',
+    index: 3,
+    senderText: 'Ada',
+    attachmentUrls: [{ url: 'https://example.test/a.png' }]
+  });
+  const second = client.eventId({
+    elementId: 'transient-webdriver-element-2',
+    text: 'stable message',
+    index: 3,
+    senderText: 'Ada',
+    attachmentUrls: [{ url: 'https://example.test/a.png' }]
+  });
+
+  assert.equal(first, second);
+  assert.notEqual(client.eventId({ text: 'stable message', index: 3, senderText: 'Grace' }), first);
+  assert.equal(client.eventId({ rawId: 'native-id-1', text: 'ignored', index: 0 }), 'native-id-1');
+});
+
 test('SeleniumXClient accepts non-numeric event IDs for cursor storage', () => {
   const client = new SeleniumXClient({
     logger: { info() {}, warn() {} },
@@ -285,6 +376,94 @@ test('SeleniumXClient accepts non-numeric event IDs for cursor storage', () => {
 
   assert.equal(client.isValidEventId('selenium-event:abc123'), true);
   assert.equal(client.isValidEventId(''), false);
+});
+
+test('SeleniumXClient merges configured browser option arguments', () => {
+  const config = loadConfig({
+    DISCORD_TOKEN: 'discord-token',
+    DISCORD_CHANNEL_ID: 'channel-1',
+    X_CLIENT_MODE: 'selenium',
+    X_DM_CONVERSATION_ID: 'dm-1',
+    X_SELENIUM_CAPABILITIES_JSON: JSON.stringify({ 'goog:chromeOptions': { args: ['--window-size=1920,1080'] } })
+  });
+  const client = new SeleniumXClient({ logger: { info() {}, warn() {} }, selenium: config.x.selenium });
+
+  assert.deepEqual(client.capabilities()['goog:chromeOptions'].args, [
+    '--headless=new',
+    '--no-sandbox',
+    '--disable-dev-shm-usage',
+    '--window-size=1920,1080'
+  ]);
+});
+
+test('SeleniumXClient rejects malformed capabilities JSON with details', () => {
+  const config = loadConfig({
+    DISCORD_TOKEN: 'discord-token',
+    DISCORD_CHANNEL_ID: 'channel-1',
+    X_CLIENT_MODE: 'selenium',
+    X_DM_CONVERSATION_ID: 'dm-1',
+    X_SELENIUM_CAPABILITIES_JSON: '[]'
+  });
+  const client = new SeleniumXClient({ logger: { info() {}, warn() {} }, selenium: config.x.selenium });
+
+  assert.throws(() => client.capabilities(), /X_SELENIUM_CAPABILITIES_JSON must be a valid JSON object: not an object/);
+});
+
+test('SeleniumXClient marks transient WebDriver errors retryable', async () => {
+  const originalFetch = globalThis.fetch;
+  let attempts = 0;
+  globalThis.fetch = async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      return Response.json({ value: { error: 'stale element reference', message: 'DOM changed' } }, { status: 500 });
+    }
+    return Response.json({ value: 'ok' });
+  };
+
+  try {
+    const client = new SeleniumXClient({
+      logger: { info() {}, warn() {} },
+      selenium: loadConfig({
+        DISCORD_TOKEN: 'discord-token',
+        DISCORD_CHANNEL_ID: 'channel-1',
+        X_CLIENT_MODE: 'selenium',
+        X_DM_CONVERSATION_ID: 'dm-1',
+        X_SELENIUM_REMOTE_URL: 'http://webdriver.test/wd/hub'
+      }).x.selenium
+    });
+
+    assert.equal(await client.webdriver('GET', '/status'), 'ok');
+    assert.equal(attempts, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('SeleniumXClient logs and clears session when close fails', async () => {
+  const originalFetch = globalThis.fetch;
+  const warnings = [];
+  globalThis.fetch = async () => Response.json({ value: { error: 'invalid session id', message: 'already gone' } }, { status: 404 });
+
+  try {
+    const client = new SeleniumXClient({
+      logger: { info() {}, warn(payload, message) { warnings.push({ payload, message }); } },
+      selenium: loadConfig({
+        DISCORD_TOKEN: 'discord-token',
+        DISCORD_CHANNEL_ID: 'channel-1',
+        X_CLIENT_MODE: 'selenium',
+        X_DM_CONVERSATION_ID: 'dm-1',
+        X_SELENIUM_REMOTE_URL: 'http://webdriver.test/wd/hub'
+      }).x.selenium
+    });
+    client.sessionId = 'session-1';
+
+    await client.close();
+
+    assert.equal(client.sessionId, null);
+    assert.equal(warnings[0].message, 'failed to close Selenium WebDriver session gracefully');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('SeleniumXClient sends DMs through WebDriver protocol', async () => {

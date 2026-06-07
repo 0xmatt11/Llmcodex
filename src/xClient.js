@@ -1,11 +1,11 @@
 import { createHash } from 'node:crypto';
-import { RetryableHttpError, retryAfterMs, withRetry } from './retry.js';
+import { RetryableHttpError, retryAfterMs, sleep, withRetry } from './retry.js';
 
 const WEBDRIVER_ELEMENT_KEY = 'element-6066-11e4-a52e-4f735466cecf';
 const ENTER_KEY = '\uE007';
 
 function syntheticId(prefix, parts) {
-  return `${prefix}:${createHash('sha256').update(JSON.stringify(parts)).digest('hex').slice(0, 24)}`;
+  return `${prefix}:${createHash('sha256').update(JSON.stringify(parts)).digest('hex')}`;
 }
 
 function joinWebDriverPath(baseUrl, path) {
@@ -21,8 +21,22 @@ function parseJsonObject(value, name) {
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not an object');
     return parsed;
   } catch (error) {
-    throw new Error(`${name} must be a JSON object`);
+    throw new Error(`${name} must be a valid JSON object: ${error.message}`);
   }
+}
+
+const TRANSIENT_WEBDRIVER_ERRORS = new Set([
+  'detached shadow root',
+  'element click intercepted',
+  'element not interactable',
+  'javascript error',
+  'no such element',
+  'stale element reference',
+  'timeout'
+]);
+
+function isTransientWebDriverError(error) {
+  return Boolean(error?.isRetryable || TRANSIENT_WEBDRIVER_ERRORS.has(error?.webdriverError));
 }
 
 export class XApiClient {
@@ -129,37 +143,59 @@ export class SeleniumXClient {
     if (this.config.browserName === 'chrome') {
       args.push('--no-sandbox', '--disable-dev-shm-usage');
       if (this.config.profileDir) args.push(`--user-data-dir=${this.config.profileDir}`);
+      const userChromeOptions = capabilities['goog:chromeOptions'] ?? {};
       capabilities['goog:chromeOptions'] = {
-        args,
-        ...(capabilities['goog:chromeOptions'] ?? {})
+        ...userChromeOptions,
+        args: [...args, ...(userChromeOptions.args ?? [])]
       };
     }
     if (this.config.browserName === 'firefox') {
       if (this.config.headless) args.splice(0, args.length, '-headless');
       if (this.config.profileDir) args.push('-profile', this.config.profileDir);
+      const userFirefoxOptions = capabilities['moz:firefoxOptions'] ?? {};
       capabilities['moz:firefoxOptions'] = {
-        args,
-        ...(capabilities['moz:firefoxOptions'] ?? {})
+        ...userFirefoxOptions,
+        args: [...args, ...(userFirefoxOptions.args ?? [])]
       };
     }
     return capabilities;
   }
 
   async webdriver(method, path, body) {
-    const response = await fetch(joinWebDriverPath(this.config.remoteUrl, path), {
-      method,
-      headers: { 'Content-Type': 'application/json' },
-      body: body === undefined ? undefined : JSON.stringify(body)
+    return withRetry(async () => {
+      const response = await fetch(joinWebDriverPath(this.config.remoteUrl, path), {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body)
+      });
+      const text = await response.text();
+      let payload = {};
+      if (text) {
+        try {
+          payload = JSON.parse(text);
+        } catch (error) {
+          error.status = response.status;
+          error.responseText = text;
+          throw error;
+        }
+      }
+      if (!response.ok || payload.value?.error) {
+        const webdriverError = payload.value?.error;
+        const error = new Error(payload.value?.message ?? `WebDriver status ${response.status}`);
+        error.status = response.status;
+        error.payload = payload;
+        error.webdriverError = webdriverError;
+        error.isRetryable = response.status >= 500 || TRANSIENT_WEBDRIVER_ERRORS.has(webdriverError);
+        throw error;
+      }
+      return payload.value;
+    }, {
+      attempts: 3,
+      baseDelayMs: 200,
+      maxDelayMs: 1000,
+      logger: this.logger,
+      isRetryable: isTransientWebDriverError
     });
-    const text = await response.text();
-    const payload = text ? JSON.parse(text) : {};
-    if (!response.ok || payload.value?.error) {
-      const error = new Error(payload.value?.message ?? `WebDriver status ${response.status}`);
-      error.status = response.status;
-      error.payload = payload;
-      throw error;
-    }
-    return payload.value;
   }
 
   async ensureSession() {
@@ -197,15 +233,18 @@ export class SeleniumXClient {
   async waitForElement(selector) {
     const startedAt = Date.now();
     let lastError;
+    let attempt = 0;
     while (Date.now() - startedAt <= this.config.waitTimeoutMs) {
       try {
         return await this.findElement(selector);
       } catch (error) {
         lastError = error;
-        await new Promise((resolve) => setTimeout(resolve, 250));
+        const delay = Math.min(100 * 2 ** attempt, 2000, Math.max(0, this.config.waitTimeoutMs - (Date.now() - startedAt)));
+        attempt += 1;
+        if (delay > 0) await sleep(delay);
       }
     }
-    throw lastError ?? new Error(`Timed out waiting for selector ${selector}`);
+    throw new Error(`Timed out waiting for selector "${selector}": ${lastError?.message ?? 'not found'}`);
   }
 
   async elementText(elementId) {
@@ -233,9 +272,13 @@ export class SeleniumXClient {
   }
 
   async getFirstChildText(elementId, selector) {
-    const children = await this.findElements(selector, elementId);
-    const childId = this.elementId(children[0]);
-    return childId ? this.elementText(childId) : '';
+    const selectors = selector.split(',').map((part) => part.trim()).filter(Boolean);
+    for (const childSelector of selectors) {
+      const children = await this.findElements(childSelector, elementId);
+      const childId = this.elementId(children[0]);
+      if (childId) return this.elementText(childId);
+    }
+    return '';
   }
 
   async getAttachmentUrls(elementId) {
@@ -248,8 +291,14 @@ export class SeleniumXClient {
     return [...new Set(urls)].map((url) => ({ url }));
   }
 
-  eventId({ elementId, rawId, text, index }) {
-    return rawId || syntheticId('selenium-event', { elementId, text, index });
+  eventId({ rawId, text, index, senderText, ownMessage, attachmentUrls = [] }) {
+    if (rawId) return rawId;
+    return syntheticId('selenium-event', {
+      text,
+      index,
+      sender: ownMessage ? this.config.selfUserId : senderText || 'unknown',
+      attachments: attachmentUrls.map(({ url }) => url).filter(Boolean).sort()
+    });
   }
 
   async getAuthenticatedUserId() {
@@ -284,21 +333,30 @@ export class SeleniumXClient {
     const elements = await this.findElements(this.config.eventSelector);
     const domEvents = [];
     for (const [index, element] of elements.entries()) {
-      const id = this.elementId(element);
-      const text = (await this.getFirstChildText(id, this.config.messageTextSelector)) || await this.elementText(id);
-      if (!text.trim()) continue;
-      const rawId = await this.elementAttribute(id, this.config.eventIdAttribute);
-      const ownMessage = await this.elementMatches(id, this.config.ownMessageSelector);
-      const senderText = await this.getFirstChildText(id, this.config.senderSelector);
-      const eventId = this.eventId({ elementId: id, rawId, text, index });
-      domEvents.push({
-        id: eventId,
-        sender_id: ownMessage || this.recentSentTextHashes.has(syntheticId('text', { text })) ? this.config.selfUserId : `selenium-sender:${senderText || 'unknown'}`,
-        sender: { username: senderText || 'X user' },
-        text,
-        attachments: await this.getAttachmentUrls(id),
-        created_at: new Date().toISOString()
-      });
+      try {
+        const id = this.elementId(element);
+        const text = (await this.getFirstChildText(id, this.config.messageTextSelector)) || await this.elementText(id);
+        if (!text.trim()) continue;
+        const rawId = await this.elementAttribute(id, this.config.eventIdAttribute);
+        const ownMessage = await this.elementMatches(id, this.config.ownMessageSelector);
+        const senderText = await this.getFirstChildText(id, this.config.senderSelector);
+        const attachments = await this.getAttachmentUrls(id);
+        const eventId = this.eventId({ rawId, text, index, senderText, ownMessage, attachmentUrls: attachments });
+        domEvents.push({
+          id: eventId,
+          sender_id: ownMessage || this.recentSentTextHashes.has(syntheticId('text', { text })) ? this.config.selfUserId : `selenium-sender:${senderText || 'unknown'}`,
+          sender: { username: senderText || 'X user' },
+          text,
+          attachments,
+          created_at: new Date().toISOString()
+        });
+      } catch (error) {
+        if (isTransientWebDriverError(error)) {
+          this.logger?.warn({ err: error, index }, 'skipping transient Selenium message element read failure');
+          continue;
+        }
+        throw error;
+      }
     }
     const newestFirst = domEvents.reverse();
     const sinceIndex = sinceId ? newestFirst.findIndex((event) => event.id === sinceId) : -1;
@@ -308,8 +366,12 @@ export class SeleniumXClient {
 
   async close() {
     if (!this.sessionId) return;
+    const sessionId = this.sessionId;
     try {
-      await this.webdriver('DELETE', `/session/${this.sessionId}`);
+      await this.webdriver('DELETE', `/session/${sessionId}`);
+      this.logger?.debug?.({ sessionId }, 'closed Selenium WebDriver session');
+    } catch (error) {
+      this.logger?.warn?.({ err: error, sessionId }, 'failed to close Selenium WebDriver session gracefully');
     } finally {
       this.sessionId = null;
     }

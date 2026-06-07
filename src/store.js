@@ -34,6 +34,12 @@ export class BridgeStore {
         value TEXT NOT NULL,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
+      CREATE TABLE IF NOT EXISTS outbound_messages (
+        target TEXT NOT NULL,
+        text_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY(target, text_hash)
+      );
     `);
   }
 
@@ -60,6 +66,14 @@ export class BridgeStore {
       INSERT OR IGNORE INTO messages(source, source_message_id, target, target_message_id, direction, content_hash)
       VALUES (@source, @sourceMessageId, @target, @targetMessageId, @direction, @contentHash)
     `).run({ source, sourceMessageId, target, targetMessageId, direction, contentHash });
+  }
+
+  recordOutboundMessage({ target, textHash }) {
+    this.db.prepare('INSERT OR IGNORE INTO outbound_messages(target, text_hash) VALUES (?, ?)').run(target, textHash);
+  }
+
+  hasOutboundTextHash(target, textHash) {
+    return Boolean(this.db.prepare('SELECT 1 FROM outbound_messages WHERE target = ? AND text_hash = ?').get(target, textHash));
   }
 
   getCursor(name) {

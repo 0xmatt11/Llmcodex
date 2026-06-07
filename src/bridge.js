@@ -3,6 +3,10 @@ import { createHash } from 'node:crypto';
 export const SOURCE_DISCORD = 'discord';
 export const SOURCE_X = 'x';
 
+export function textHash(text) {
+  return createHash('sha256').update(String(text ?? '')).digest('hex');
+}
+
 export function contentHash({ source, id, text, attachments = [] }) {
   return createHash('sha256')
     .update(JSON.stringify({ source, id, text: text ?? '', attachments: attachments.map((a) => a.url ?? a.name ?? '') }))
@@ -124,6 +128,7 @@ export class BridgeRouter {
       releaseDedupeReservation(this.store, decision.eventKey, this.logger);
       throw error;
     }
+    this.store.recordOutboundMessage?.({ target: SOURCE_X, textHash: textHash(text) });
     this.store.recordMapping({
       source: SOURCE_DISCORD,
       sourceMessageId: normalized.id,
@@ -138,6 +143,9 @@ export class BridgeRouter {
 
   async bridgeXMessage(event) {
     const normalized = normalizeXMessage(event);
+    if (this.config.x.mode === 'selenium' && this.store.hasOutboundTextHash?.(SOURCE_X, textHash(normalized.text))) {
+      return { skipped: 'self_message' };
+    }
     const decision = shouldBridge({
       store: this.store,
       source: SOURCE_X,

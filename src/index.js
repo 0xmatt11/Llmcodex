@@ -11,7 +11,7 @@ const config = loadConfig();
 const logger = createLogger(config.logLevel);
 const store = new BridgeStore(config.sqlitePath);
 const discordClient = createDiscordClient();
-const xClient = createXClient({ config, logger });
+const xClient = await createXClient({ config, logger });
 logger.info({ transport: config.x.transport }, 'selected X bridge transport');
 const router = new BridgeRouter({ store, discordClient, xClient, logger, config });
 let polling = false;

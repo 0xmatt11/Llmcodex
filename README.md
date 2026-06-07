@@ -140,7 +140,7 @@ cp .env.example .env
 | `X_BROWSER_USER_DATA_DIR` | Selenium optional | Persistent Chrome profile directory, default `./browser-data`. |
 | `X_BROWSER_HEADLESS` | Selenium optional | `true` by default. Set `false` when doing manual local login. |
 | `X_BROWSER_NO_SANDBOX` | Selenium optional | `true` by default for containers. |
-| `CHROME_BIN` | Selenium optional | Chromium binary path. Docker defaults to `/usr/bin/chromium-browser`. |
+| `CHROME_BIN` | Selenium optional | Chromium binary path. Docker defaults to `/usr/bin/chromium`. |
 | `X_COOKIES_JSON` | Selenium optional | JSON array/object of X cookies to inject before opening the DM. Keep secret. |
 | `X_MESSAGE_SELECTOR` | Selenium optional | CSS selector for message nodes, default `[data-testid="messageEntry"]`. |
 | `X_COMPOSER_SELECTOR` | Selenium optional | CSS selector for the DM composer, default `[data-testid="dmComposerTextInput"]`. |

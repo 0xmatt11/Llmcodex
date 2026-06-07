@@ -8,12 +8,13 @@ A production-ready Node.js service that bridges one configured Discord channel w
 - X/Twitter DM group chat bridge in both directions.
 - OAuth 2.0 user-context bearer token support for X DM read/write access.
 - SQLite persistence for message mappings, cursors, and dedupe event state.
-- Echo-loop protection for bot/self messages and already-bridged message IDs.
+- Echo-loop protection for bot/self messages, already-bridged message IDs, and duplicate in-flight events.
 - Attachment support:
-  - Discord → X: public Discord attachment URLs are appended to the DM text.
+  - Discord → X: public Discord attachment URLs are appended to the DM text, capped by `X_MAX_ATTACHMENT_LINKS`.
   - X → Discord: attachment URLs are appended when returned by the API; otherwise a placeholder is posted.
-- Retry logic with exponential backoff, jitter, and `Retry-After` support for rate limits/transient failures.
+- Retry logic with exponential backoff, jitter, and `Retry-After` support for X rate limits/transient failures.
 - Pino structured JSON logs with token redaction.
+- Discord mention suppression for bridged X messages (`allowedMentions: { parse: [] }`) plus `@` escaping in rendered text.
 - `/healthz` endpoint.
 - Dockerfile and `docker-compose.yml`.
 - Unit tests for dedupe and routing logic.
@@ -61,6 +62,7 @@ cp .env.example .env
 
 | Variable | Required | Description |
 | --- | --- | --- |
+| `NODE_ENV` | No | Runtime environment. The Docker image sets this to `production`; `.env.example` does the same for compose/local env-file use. |
 | `PORT` | No | Health endpoint port, default `3000`. |
 | `LOG_LEVEL` | No | Pino log level, default `info`. |
 | `SQLITE_PATH` | No | SQLite database path, default `./data/bridge.sqlite`. |
@@ -83,7 +85,7 @@ npm run lint
 npm start
 ```
 
-The service starts the Discord bot, launches the health server, then polls the configured X DM conversation.
+The service loads `.env`, opens the SQLite store, starts the health server, logs in the Discord bot, and then polls the configured X DM conversation. Discord messages are bridged from the configured channel as `messageCreate` events arrive.
 
 ## Docker Deployment
 
@@ -117,16 +119,18 @@ Example response:
 - Keep `.env` and SQLite volumes private; they may contain credentials or message metadata.
 - Logs are structured JSON. Known token fields and authorization headers are redacted.
 - Rate limits and transient X API/server errors are retried automatically with bounded backoff.
-- Message mappings are persisted before duplicate deliveries are accepted again.
-- X DM polling uses a stored cursor named `x_dm_since_id`; deleting the SQLite database can cause old messages to be seen again.
+- Message mappings are persisted after successful cross-posts; duplicate in-flight events are reserved before sending and released if the send fails so a later retry can bridge them.
+- X DM polling uses a stored cursor named `x_dm_since_id`. The cursor is used only when it looks like a numeric X event ID; invalid stored cursor values are ignored and logged. Deleting the SQLite database can cause old messages to be seen again.
+- Bridged X messages are posted to Discord with mentions disabled and `@` characters escaped to reduce accidental pings.
 - Discord attachments are represented as links because the X DM API may not accept arbitrary uploaded media for every account/tier/API version.
 
 ## Test Coverage
 
 The included tests cover:
 
-- Dedupe decisions.
+- Dedupe decisions, including reservation release after send failures.
 - Self-message and already-mapped skip behavior.
 - Discord → X routing.
 - X → Discord routing.
-- Attachment rendering and placeholder behavior.
+- Attachment rendering, placeholder behavior, and Discord mention suppression.
+- X client retry behavior for retryable non-JSON responses.
